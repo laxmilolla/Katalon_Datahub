@@ -62,8 +62,22 @@
    </GlobalVariableEntity>
    <GlobalVariableEntity>
       <description></description>
-      <initValue>'TestFiles/cds/'</initValue>
+      <initValue>'TestFiles/cds/Test1/'</initValue>
       <name>uploadFileFolder</name>
+      <protected>false</protected>
+      <valueType>STRING</valueType>
+   </GlobalVariableEntity>
+   <GlobalVariableEntity>
+      <description></description>
+      <initValue>'Downloads/'</initValue>
+      <name>downloadFolder</name>
+      <protected>false</protected>
+      <valueType>STRING</valueType>
+   </GlobalVariableEntity>
+   <GlobalVariableEntity>
+      <description>Validation method: 'ui' to read from UI table, 'download' to download and read from file</description>
+      <initValue>'ui'</initValue>
+      <name>validationMethod</name>
       <protected>false</protected>
       <valueType>STRING</valueType>
    </GlobalVariableEntity>

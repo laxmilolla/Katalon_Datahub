@@ -3,10 +3,11 @@
  * @param result - Map with 'success' boolean and 'mismatches' list
  * @param validationName - Name of validation for error messages
  * @param throwOnFailure - Whether to throw exception on failure (default: true)
+ * @param exportReport - Whether to export Excel/HTML report (default: true if failed)
  * @return boolean - true if validation passed, false if failed
  */
 class HandleValidationResult {
-    static boolean checkAndThrow(Map<String, Object> result, String validationName, boolean throwOnFailure = true) {
+    static boolean checkAndThrow(Map<String, Object> result, String validationName, boolean throwOnFailure = true, boolean exportReport = true) {
         if (!result['success']) {
             List mismatches = result['mismatches'] ?: []
             println("\n❌ ${validationName} validation failed: ${mismatches.size()} mismatch(es)")
@@ -15,6 +16,18 @@ class HandleValidationResult {
             mismatches.each { mismatch ->
                 println("   - Row ${mismatch['row']}, Column '${mismatch['column']}': Expected '${mismatch['expected']}', Actual '${mismatch['actual']}'" + 
                        (mismatch['matchType'] ? " (matchType: ${mismatch['matchType']})" : ""))
+            }
+            
+            // Export report if requested
+            if (exportReport) {
+                try {
+                    Map<String, String> reportPaths = ExportValidationReport.export(result, validationName)
+                    println("📊 Detailed reports available:")
+                    println("   Excel: ${reportPaths['excelPath']}")
+                    println("   HTML:  ${reportPaths['htmlPath']}")
+                } catch (Exception e) {
+                    println("⚠️  Failed to generate reports: ${e.message}")
+                }
             }
             
             if (throwOnFailure) {
@@ -43,9 +56,10 @@ class HandleValidationResult {
      * @param result - Map with 'success', 'nodeResults', and 'mismatches'
      * @param validationName - Name of validation for error messages
      * @param throwOnFailure - Whether to throw exception on failure (default: true)
+     * @param exportReport - Whether to export Excel/HTML report (default: true if failed)
      * @return boolean - true if validation passed, false if failed
      */
-    static boolean checkDataViewResult(Map<String, Object> result, String validationName, boolean throwOnFailure = true) {
+    static boolean checkDataViewResult(Map<String, Object> result, String validationName, boolean throwOnFailure = true, boolean exportReport = true) {
         if (!result['success']) {
             List failedNodes = result['nodeResults'].findAll { !it['success'] }.collect { it['nodeType'] }
             List allMismatches = result['mismatches'] ?: []
@@ -55,6 +69,18 @@ class HandleValidationResult {
             // Log first few mismatches
             allMismatches.take(5).each { mismatch ->
                 println("   - Row ${mismatch['row']}, Column ${mismatch['column']}: Expected '${mismatch['expected']}', Actual '${mismatch['actual']}'")
+            }
+            
+            // Export report if requested
+            if (exportReport) {
+                try {
+                    Map<String, String> reportPaths = ExportValidationReport.export(result, validationName)
+                    println("📊 Detailed reports available:")
+                    println("   Excel: ${reportPaths['excelPath']}")
+                    println("   HTML:  ${reportPaths['htmlPath']}")
+                } catch (Exception e) {
+                    println("⚠️  Failed to generate reports: ${e.message}")
+                }
             }
             
             if (throwOnFailure) {

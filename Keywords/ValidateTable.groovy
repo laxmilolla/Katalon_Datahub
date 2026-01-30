@@ -6,6 +6,7 @@ import com.kms.katalon.core.testobject.ConditionType
 import org.openqa.selenium.WebElement
 import org.openqa.selenium.By
 import org.apache.poi.ss.usermodel.Workbook
+import internal.GlobalVariable as GlobalVariable
 
 /**
  * Validate table data against expected results
@@ -13,11 +14,12 @@ import org.apache.poi.ss.usermodel.Workbook
  * @param expectedResultsSheet - Sheet name with expected results
  * @param tableXPath - XPath to table (optional, defaults to first visible table)
  * @param workbook - Excel Workbook object
+ * @param downloadButtonXPath - XPath to download button (optional, if provided and validationMethod='download', will use download)
  * @return Map with success (boolean) and mismatches (List)
  */
 class ValidateTable {
     static Map<String, Object> validate(String tabName, String expectedResultsSheet, 
-                                         String tableXPath, Workbook workbook) {
+                                         String tableXPath, Workbook workbook, String downloadButtonXPath = null) {
         // Get expected results
         def expectedResults = GetExpectedResults.getExpectedResults(workbook)
         def expected = expectedResults[expectedResultsSheet]
@@ -31,8 +33,38 @@ class ValidateTable {
             switchToTab(tabName)
         }
         
-        // Read table from UI
-        def tableData = readTableFromUI(tableXPath)
+        // Read table data based on validation method
+        def tableData
+        String validationMethod = GlobalVariable.validationMethod ?: 'ui'
+        
+        if (validationMethod == 'download' && downloadButtonXPath) {
+            // Download and read from file
+            println("📥 Using download method for validation")
+            Map<String, Object> downloadResult = DownloadTableData.downloadAndRead(downloadButtonXPath, 30)
+            
+            if (!downloadResult['success']) {
+                throw new Exception("Download failed: ${downloadResult['error']}")
+            }
+            
+            // Read downloaded TSV/CSV file
+            String downloadedFilePath = downloadResult['filePath']
+            File downloadedFile = new File(downloadedFilePath)
+            Map<String, Object> downloadedData = DownloadTableData.readTSVFile(downloadedFilePath)
+            
+            // Convert downloaded data to same format as UI table
+            tableData = [
+                headers: downloadedData['headers'],
+                rows: downloadedData['rows']
+            ]
+            println("✅ Read downloaded file: ${downloadedFile.name} - ${tableData['headers'].size()} columns, ${tableData['rows'].size()} rows")
+        } else {
+            // Read from UI table (default or if download not available)
+            if (validationMethod == 'download' && !downloadButtonXPath) {
+                println("⚠️  validationMethod is 'download' but no downloadButtonXPath provided, falling back to UI method")
+            }
+            println("🖥️  Using UI table method for validation")
+            tableData = readTableFromUI(tableXPath)
+        }
         
         // Compare and find mismatches
         List<Map<String, Object>> mismatches = []

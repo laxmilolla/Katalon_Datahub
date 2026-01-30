@@ -9,6 +9,7 @@ import org.openqa.selenium.By
 import java.io.File
 import java.io.FileFilter
 import groovy.json.JsonSlurper
+import internal.GlobalVariable as GlobalVariable
 
 /**
  * Validate data view table against TSV files (matches Playwright Validate_data_view)
@@ -46,23 +47,57 @@ class ValidateDataView {
         
         println("📁 Found ${tsvFiles.length} TSV file(s): ${tsvFiles.collect { it.name }.join(', ')}")
         
-        // Step 3: Extract node types from filenames (same pattern as Playwright)
+        // Step 3: Extract node types from filenames
+        // Pattern: Extract node type between underscores: something_nodetype_something
+        // After first underscore, node type ends with next underscore
+        // Examples: "GC_sample_v11.0.3" -> "sample", "GC_Data_Loading_Template_consent_group_v9.0.0" -> "consent_group"
         List<String> nodeTypes = []
         for (File tsvFile : tsvFiles) {
             String basename = tsvFile.name.replace('.tsv', '').toLowerCase()
             
-            // Pattern: "GC_Data_Loading_Template_consent_group_v9.0.0.tsv" -> "consent_group"
-            def templateMatch = basename =~ /gc_data_loading_template_(.+?)_v\d+\.\d+\.\d+/
-            if (templateMatch) {
-                nodeTypes.add(templateMatch[0][1])
-            } else {
-                // Try simple pattern: "template_nodeType"
-                def simpleMatch = basename =~ /template_(.+)/
-                if (simpleMatch) {
-                    nodeTypes.add(simpleMatch[0][1])
+            // Pattern: Extract node type between underscores
+            // Find first underscore, then extract until next underscore (or end if no more underscores)
+            // For versioned files: extract part before version pattern
+            def versionMatch = basename =~ /^(.+?)_v\d+\.\d+\.\d+$/
+            if (versionMatch) {
+                // Has version pattern: extract everything after last _ before version
+                // e.g., "gc_data_loading_template_consent_group_v9.0.0" -> "consent_group"
+                String beforeVersion = versionMatch[0][1]
+                int lastUnderscore = beforeVersion.lastIndexOf('_')
+                if (lastUnderscore >= 0) {
+                    String nodeType = beforeVersion.substring(lastUnderscore + 1)
+                    nodeTypes.add(nodeType)
                 } else {
-                    // Fallback: use whole filename without extension
-                    nodeTypes.add(basename)
+                    nodeTypes.add(beforeVersion)
+                }
+            } else {
+                // No version pattern: extract between first _ and next _
+                // Pattern: anything_nodetype_anything
+                // After first _, extract until next _
+                def match = basename =~ /^[^_]+_([^_]+)_/
+                if (match) {
+                    // Found pattern: something_nodetype_something
+                    nodeTypes.add(match[0][1])
+                } else {
+                    // Try: something_nodetype (no trailing underscore)
+                    def matchNoTrailing = basename =~ /^[^_]+_([^_]+)$/
+                    if (matchNoTrailing) {
+                        nodeTypes.add(matchNoTrailing[0][1])
+                    } else {
+                        // Fallback: extract after first underscore until last underscore
+                        int firstUnderscore = basename.indexOf('_')
+                        int lastUnderscore = basename.lastIndexOf('_')
+                        if (firstUnderscore >= 0 && lastUnderscore > firstUnderscore) {
+                            String nodeType = basename.substring(firstUnderscore + 1, lastUnderscore)
+                            nodeTypes.add(nodeType)
+                        } else if (firstUnderscore >= 0) {
+                            // Only one underscore: extract everything after it
+                            nodeTypes.add(basename.substring(firstUnderscore + 1))
+                        } else {
+                            // No underscores: use whole filename
+                            nodeTypes.add(basename)
+                        }
+                    }
                 }
             }
         }
@@ -118,9 +153,31 @@ class ValidateDataView {
                 WebUI.delay(waitTime / 1000)
                 println("⏱️  Waited ${waitTime}ms for status values to update")
                 
-                // Read table from UI
-                Map<String, Object> uiTable = readUITable(tableXPath)
-                println("✅ Read UI table: ${uiTable['headers'].size()} columns, ${uiTable['rows'].size()} rows")
+                // Read table data based on validation method
+                Map<String, Object> uiTable
+                String validationMethod = GlobalVariable.validationMethod ?: 'ui'
+                
+                if (validationMethod == 'download') {
+                    // Download and read from file
+                    println("📥 Using download method for validation")
+                    String downloadButtonXPath = '//button[@data-testid="export-node-data-button"]'
+                    Map<String, Object> downloadResult = DownloadTableData.downloadAndRead(downloadButtonXPath, 30)
+                    
+                    if (!downloadResult['success']) {
+                        throw new Exception("Download failed: ${downloadResult['error']}")
+                    }
+                    
+                    // Read downloaded TSV file
+                    String downloadedFilePath = downloadResult['filePath']
+                    File downloadedFile = new File(downloadedFilePath)
+                    uiTable = DownloadTableData.readTSVFile(downloadedFilePath)
+                    println("✅ Read downloaded file: ${downloadedFile.name} - ${uiTable['headers'].size()} columns, ${uiTable['rows'].size()} rows")
+                } else {
+                    // Read from UI table (default)
+                    println("🖥️  Using UI table method for validation")
+                    uiTable = readUITable(tableXPath)
+                    println("✅ Read UI table: ${uiTable['headers'].size()} columns, ${uiTable['rows'].size()} rows")
+                }
                 
                 // DEBUG: Show UI table headers and sample data
                 println("🔍 DEBUG UI Table Headers: ${uiTable['headers'].join(' | ')}")
@@ -147,34 +204,39 @@ class ValidateDataView {
                 // Determine sort column for this node type
                 String sortColumnForNode = getSortColumn(sortByColumn, nodeType, tsvData['headers'] as List<String>)
                 
-                // Sort TSV rows by sortColumnForNode if determined
                 if (sortColumnForNode) {
+                    println("🔍 Using sort column '${sortColumnForNode}' - sorting both files before comparison")
+                    
+                    // Sort both files by the same column to ensure same order
                     tsvData = sortTable(tsvData, sortColumnForNode)
-                    println("✅ Sorted TSV by column: ${sortColumnForNode}")
-                }
-                
-                // Sort UI rows by sortColumnForNode if determined
-                if (sortColumnForNode) {
                     uiTable = sortTable(uiTable, sortColumnForNode)
-                    println("✅ Sorted UI table by column: ${sortColumnForNode}")
+                    
+                    println("✅ Both files sorted by '${sortColumnForNode}' - using position-based comparison")
+                } else {
+                    println("⚠️  No sort column detected - will use position-based row matching (files not sorted)")
                 }
                 
-                // Compare data
-                List<Map<String, Object>> mismatches = compareTables(uiTable, tsvData, nodeType)
+                // Compare data - returns both mismatches and all results (pass/fail)
+                // Files are sorted by same column, so position-based comparison works correctly
+                Map<String, Object> comparisonResult = compareTables(uiTable, tsvData, nodeType, validationMethod, sortColumnForNode)
+                List<Map<String, Object>> mismatches = comparisonResult['mismatches'] ?: []
+                List<Map<String, Object>> allResults = comparisonResult['allResults'] ?: []
                 
                 if (mismatches.size() > 0) {
-                    println("❌ Node type '${nodeType}' validation failed: ${mismatches.size()} mismatch(es)")
+                    println("❌ Node type '${nodeType}' validation failed: ${mismatches.size()} mismatch(es) out of ${allResults.size()} comparisons")
                     nodeResults.add([
                         nodeType: nodeType,
                         success: false,
-                        mismatches: mismatches
+                        mismatches: mismatches,
+                        allResults: allResults  // Include all results (pass + fail)
                     ])
                     allMismatches.addAll(mismatches)
                 } else {
-                    println("✅ Node type '${nodeType}' validation passed")
+                    println("✅ Node type '${nodeType}' validation passed: ${allResults.size()} comparison(s)")
                     nodeResults.add([
                         nodeType: nodeType,
-                        success: true
+                        success: true,
+                        allResults: allResults  // Include all results (all pass)
                     ])
                 }
                 
@@ -403,23 +465,127 @@ class ValidateDataView {
     
     private static def compareTables(Map<String, Object> uiTable, 
                                      Map<String, Object> tsvData,
-                                     String nodeType) {
+                                     String nodeType,
+                                     String validationMethod = 'ui',
+                                     String sortColumn = null) {
         def mismatches = []
+        def allResults = []  // Track all comparisons (both pass and fail)
         def uiHeaders = uiTable['headers']
         def tsvHeaders = tsvData['headers']
         def uiRows = uiTable['rows']
         def tsvRows = tsvData['rows']
         
+        // Auto-detect Expected_* columns in TSV (e.g., Expected_status, Expected_Severity)
+        // These will be mapped to corresponding columns in downloaded files for comparison
+        Map<String, Integer> expectedColumnMap = [:]  // TSV Expected_* column → TSV column index
+        Map<String, String> expectedToDownloadedMap = [:]  // TSV Expected_* column → Downloaded column name
+        
+        for (int i = 0; i < tsvHeaders.size(); i++) {
+            String tsvHeader = tsvHeaders[i]
+            String tsvHeaderLower = tsvHeader.toLowerCase().trim()
+            
+            // Check if column starts with "Expected_" (case-insensitive)
+            if (tsvHeaderLower.startsWith('expected_')) {
+                // Extract the suffix (e.g., "Expected_status" → "status", "Expected_Severity" → "Severity")
+                // "Expected_" is 9 characters, so substring(9) removes it
+                String expectedSuffix = tsvHeader.substring(9)  // Remove "Expected_" prefix (9 chars)
+                expectedColumnMap[tsvHeader] = i
+                
+                // Find corresponding column in downloaded file (case-insensitive)
+                // IMPORTANT: Exclude Expected_* columns from search - we want the actual column, not Expected_* version
+                int downloadedColIndex = -1
+                String expectedSuffixLower = expectedSuffix.toLowerCase()
+                
+                // First try exact match (excluding Expected_* columns)
+                for (int j = 0; j < uiHeaders.size(); j++) {
+                    String uiHeaderLower = uiHeaders[j].toLowerCase().trim()
+                    // Skip Expected_* columns - we want the actual column
+                    if (uiHeaderLower.startsWith('expected_')) {
+                        continue
+                    }
+                    if (uiHeaderLower == expectedSuffixLower) {
+                        downloadedColIndex = j
+                        break
+                    }
+                }
+                
+                // If exact match not found, try partial match (still excluding Expected_* columns)
+                if (downloadedColIndex < 0) {
+                    for (int j = 0; j < uiHeaders.size(); j++) {
+                        String uiHeaderLower = uiHeaders[j].toLowerCase().trim()
+                        // Skip Expected_* columns
+                        if (uiHeaderLower.startsWith('expected_')) {
+                            continue
+                        }
+                        if (uiHeaderLower.contains(expectedSuffixLower)) {
+                            downloadedColIndex = j
+                            break
+                        }
+                    }
+                }
+                
+                if (downloadedColIndex >= 0) {
+                    expectedToDownloadedMap[tsvHeader] = uiHeaders[downloadedColIndex]
+                    println("🔍 Auto-detected mapping: TSV '${tsvHeader}' → Downloaded '${uiHeaders[downloadedColIndex]}'")
+                } else {
+                    println("⚠️  Found TSV column '${tsvHeader}' but no matching column '${expectedSuffix}' in downloaded file (excluding Expected_* columns)")
+                    println("      Available downloaded headers: ${uiHeaders.join(', ')}")
+                }
+            }
+        }
+        
+        if (expectedColumnMap.size() > 0) {
+            println("✅ Auto-detected ${expectedColumnMap.size()} Expected_* column(s) for comparison")
+        }
+        
+        // For downloaded files, we keep the status/Severity columns (they will be compared via Expected_* mapping)
+        // But we need to exclude Expected_* columns from regular header count comparison
+        // since they are compared separately
+        
         // Compare headers (case-insensitive)
-        if (uiHeaders.size() != tsvHeaders.size()) {
-            mismatches.add([
-                row: 0,
-                column: 'Header Count',
-                expected: String.valueOf(tsvHeaders.size()),
-                actual: String.valueOf(uiHeaders.size()),
-                matchType: 'exact',
-                nodeType: nodeType
-            ])
+        // Exclude 'type' and Expected_* columns from count (they are handled separately)
+        int tsvRegularColumns = tsvHeaders.count { 
+            String h = it.toLowerCase().trim()
+            return h != 'type' && !h.startsWith('expected_')
+        }
+        
+        // For downloaded files, exclude Expected_* columns and 'type' from count (same as TSV)
+        int uiRegularColumns = uiHeaders.count {
+            String h = it.toLowerCase().trim()
+            return h != 'type' && !h.startsWith('expected_')
+        }
+        
+        // For downloaded files, account for Expected_* columns that map to downloaded columns
+        // If Expected_status maps to status, both count as one column for header count
+        if (validationMethod == 'download' && expectedColumnMap.size() > 0) {
+            // Downloaded file should have: regular columns (excluding Expected_*) + mapped Expected_* columns
+            // But Expected_* columns in TSV don't count as separate columns
+            // So: downloaded_count (excluding Expected_*) should equal tsv_regular_count + mapped_expected_count
+            int mappedExpectedCount = expectedToDownloadedMap.size()
+            int expectedDownloadedCount = tsvRegularColumns + mappedExpectedCount
+            
+            if (uiRegularColumns != expectedDownloadedCount) {
+                mismatches.add([
+                    row: 0,
+                    column: 'Header Count',
+                    expected: String.valueOf(expectedDownloadedCount) + " (regular: ${tsvRegularColumns} + mapped Expected_*: ${mappedExpectedCount})",
+                    actual: String.valueOf(uiRegularColumns) + " (excluding Expected_* columns in downloaded file)",
+                    matchType: 'exact',
+                    nodeType: nodeType
+                ])
+            }
+        } else {
+            // Normal comparison (no Expected_* columns or UI method)
+            if (uiRegularColumns != tsvRegularColumns) {
+                mismatches.add([
+                    row: 0,
+                    column: 'Header Count',
+                    expected: String.valueOf(tsvRegularColumns),
+                    actual: String.valueOf(uiRegularColumns),
+                    matchType: 'exact',
+                    nodeType: nodeType
+                ])
+            }
         }
         
         // Compare row count
@@ -434,23 +600,50 @@ class ValidateDataView {
             ])
         }
         
-        // Compare data rows (only if headers and row counts match)
-        if (uiHeaders.size() == tsvHeaders.size() && uiRows.size() == tsvRows.size()) {
-            // Map TSV headers to UI table headers (case-insensitive)
-            // Special mapping: Automation_status → Status
+        // Compare data rows
+        // Even if header counts don't match, we still want to compare Expected_* columns row-by-row
+        int expectedRowCount = tsvRows.size()
+        boolean headerCountsOk = false
+        
+        if (validationMethod == 'download' && expectedColumnMap.size() > 0) {
+            // For downloaded files with Expected_* columns: downloaded should have regular + mapped columns
+            headerCountsOk = (uiRegularColumns == (tsvRegularColumns + expectedToDownloadedMap.size()))
+        } else if (validationMethod == 'ui') {
+            // For UI method: regular column counts should match
+            headerCountsOk = (uiRegularColumns == tsvRegularColumns)
+        } else {
+            // For downloaded without Expected_*: regular counts should match
+            headerCountsOk = (uiRegularColumns == tsvRegularColumns)
+        }
+        
+        // Always compare Expected_* columns row-by-row, even if header counts don't match
+        // For regular columns, only compare if header counts match (to avoid false positives)
+        if (uiRows.size() == expectedRowCount) {
+            
+            // Map TSV headers to UI/downloaded table headers (case-insensitive)
+            // Skip 'type' and Expected_* columns (handled separately)
             List<Integer> headerMap = []
-            println("\n🔍 DEBUG: Column Mapping (TSV → UI):")
+            println("\n🔍 DEBUG: Column Mapping (TSV → UI/Downloaded):")
             for (String tsvHeader : tsvHeaders) {
+                String tsvHeaderLower = tsvHeader.toLowerCase().trim()
+                
                 // Skip 'type' column - it's metadata in TSV but not displayed in UI table
-                if (tsvHeader.toLowerCase() == 'type') {
+                if (tsvHeaderLower == 'type') {
                     println("   ⏭️  TSV '${tsvHeader}' → SKIPPED (metadata column, not in UI)")
                     headerMap.add(-1)  // Mark as skip
                     continue
                 }
                 
+                // Skip Expected_* columns - they are compared separately via mapping
+                if (tsvHeaderLower.startsWith('expected_')) {
+                    println("   ⏭️  TSV '${tsvHeader}' → SKIPPED (Expected_* column, compared separately)")
+                    headerMap.add(-2)  // Mark as Expected_* column (different handling)
+                    continue
+                }
+                
                 // Special mapping: Automation_status → Status
                 String mappedHeader = tsvHeader
-                if (tsvHeader.toLowerCase() == 'automation_status') {
+                if (tsvHeaderLower == 'automation_status') {
                     mappedHeader = 'Status'
                 }
                 
@@ -458,71 +651,183 @@ class ValidateDataView {
                 headerMap.add(uiIndex)
                 
                 if (uiIndex >= 0) {
-                    println("   ✅ TSV '${tsvHeader}' → UI '${uiHeaders[uiIndex]}' (index ${uiIndex})")
+                    println("   ✅ TSV '${tsvHeader}' → UI/Downloaded '${uiHeaders[uiIndex]}' (index ${uiIndex})")
                 } else {
-                    println("   ❌ TSV '${tsvHeader}' → NOT FOUND in UI headers")
-                    println("      Available UI headers: ${uiHeaders.join(', ')}")
+                    println("   ❌ TSV '${tsvHeader}' → NOT FOUND in UI/Downloaded headers")
+                    println("      Available headers: ${uiHeaders.join(', ')}")
                 }
             }
             
-            // Compare each row
-            for (int rowIdx = 0; rowIdx < Math.min(uiRows.size(), tsvRows.size()); rowIdx++) {
-                def uiRow = uiRows[rowIdx]
+            // Since both files are sorted by the same column, use position-based comparison
+            // Row 1 vs Row 1, Row 2 vs Row 2, etc.
+            int maxRows = Math.min(tsvRows.size(), uiRows.size())
+            
+            for (int rowIdx = 0; rowIdx < maxRows; rowIdx++) {
                 def tsvRow = tsvRows[rowIdx]
+                def uiRow = uiRows[rowIdx]
                 
-                for (int colIdx = 0; colIdx < tsvHeaders.size(); colIdx++) {
-                    int uiColIdx = headerMap[colIdx]
-                    
-                    // Skip 'type' column - it's metadata, not in UI
-                    if (tsvHeaders[colIdx].toLowerCase() == 'type') {
-                        continue
+                if (sortColumn) {
+                    // Verify rows match by sort column (sanity check after sorting)
+                    int tsvSortColIdx = findColumnIndex(tsvHeaders, sortColumn)
+                    int uiSortColIdx = findColumnIndex(uiHeaders, sortColumn)
+                    if (tsvSortColIdx >= 0 && uiSortColIdx >= 0) {
+                        String tsvSortValue = (tsvRow[tsvSortColIdx] ?: '').trim().toLowerCase()
+                        String uiSortValue = (uiRow[uiSortColIdx] ?: '').trim().toLowerCase()
+                        if (tsvSortValue != uiSortValue) {
+                            println("   ⚠️  Row ${rowIdx + 1} sort column mismatch: TSV='${tsvRow[tsvSortColIdx]}' vs Downloaded='${uiRow[uiSortColIdx]}' (files may not be sorted correctly)")
+                        }
                     }
-                    
-                    if (uiColIdx >= 0 && uiColIdx < uiRow.size()) {
-                        String expected = (tsvRow[colIdx] ?: '').trim()
-                        String actual = (uiRow[uiColIdx] ?: '').trim()
+                }
+                
+                // First: Compare regular columns (non-Expected_* columns) - only if header counts match
+                if (headerCountsOk) {
+                    for (int colIdx = 0; colIdx < tsvHeaders.size(); colIdx++) {
+                        int uiColIdx = headerMap[colIdx]
+                        String tsvHeaderLower = tsvHeaders[colIdx].toLowerCase().trim()
                         
-                        // Normalize truncated text for comparison (remove trailing ...)
-                        if (actual.endsWith('...')) {
-                            // Try to match partial text
-                            String actualWithoutEllipsis = actual.replaceAll(/\\.\\.\\.$/, '').trim()
-                            if (expected.startsWith(actualWithoutEllipsis)) {
-                                // If expected starts with the visible part, consider it a match
-                                // (UI truncates but shows beginning)
-                                continue
-                            }
+                        // Skip 'type' column - it's metadata, not in UI
+                        if (tsvHeaderLower == 'type') {
+                            continue
                         }
                         
-                        if (expected != actual) {
-                            // DEBUG: Log first few mismatches with details
-                            if (mismatches.size() < 3) {
-                                println("   🔍 Mismatch Row ${rowIdx + 1}, Column '${tsvHeaders[colIdx]}':")
-                                println("      Expected (TSV): '${expected}' (length: ${expected.length()})")
-                                println("      Actual (UI):   '${actual}' (length: ${actual.length()})")
-                                if (actual.contains('...')) {
-                                    println("      ⚠️  UI value appears truncated!")
+                        // Skip Expected_* columns - handled separately below
+                        if (tsvHeaderLower.startsWith('expected_')) {
+                            continue
+                        }
+                        
+                        if (uiColIdx >= 0 && uiColIdx < uiRow.size()) {
+                            String expected = (tsvRow[colIdx] ?: '').trim()
+                            String actual = (uiRow[uiColIdx] ?: '').trim()
+                            
+                            // Normalize truncated text for comparison (remove trailing ...)
+                            if (actual.endsWith('...')) {
+                                // Try to match partial text
+                                String actualWithoutEllipsis = actual.replaceAll(/\\.\\.\\.$/, '').trim()
+                                if (expected.startsWith(actualWithoutEllipsis)) {
+                                    // If expected starts with the visible part, consider it a match
+                                    // (UI truncates but shows beginning)
+                                    continue
                                 }
                             }
                             
-                            mismatches.add([
+                            // Track result (both pass and fail)
+                            boolean isMatch = (expected == actual)
+                            Map<String, Object> result = [
                                 row: rowIdx + 1,
                                 column: tsvHeaders[colIdx],
                                 expected: expected,
                                 actual: actual,
                                 matchType: 'exact',
-                                nodeType: nodeType
-                            ])
+                                nodeType: nodeType,
+                                result: isMatch ? 'PASS' : 'FAIL'
+                            ]
+                            allResults.add(result)
+                            
+                            if (!isMatch) {
+                                // DEBUG: Log first few mismatches with details
+                                if (mismatches.size() < 3) {
+                                    println("   🔍 Mismatch Row ${rowIdx + 1}, Column '${tsvHeaders[colIdx]}':")
+                                    println("      Expected (TSV): '${expected}' (length: ${expected.length()})")
+                                    println("      Actual (UI/Downloaded):   '${actual}' (length: ${actual.length()})")
+                                    if (actual.contains('...')) {
+                                        println("      ⚠️  UI value appears truncated!")
+                                    }
+                                }
+                                
+                                mismatches.add(result)
+                            }
+                        } else if (uiColIdx < 0) {
+                            // Column not found in UI
+                            if (mismatches.size() < 3) {
+                                println("   ❌ Column '${tsvHeaders[colIdx]}' not found in UI/Downloaded table for Row ${rowIdx + 1}")
+                            }
                         }
-                    } else if (uiColIdx < 0) {
-                        // Column not found in UI
-                        if (mismatches.size() < 3) {
-                            println("   ❌ Column '${tsvHeaders[colIdx]}' not found in UI table")
+                    }
+                } else {
+                    println("   ⚠️  Skipping regular column comparison for Row ${rowIdx + 1} - header counts don't match")
+                }
+                
+                // Second: Compare Expected_* columns with their mapped downloaded columns
+                // Always do this, even if header counts don't match
+                expectedColumnMap.each { expectedTsvCol, expectedTsvColIdx ->
+                    String downloadedColName = expectedToDownloadedMap[expectedTsvCol]
+                    if (downloadedColName) {
+                        // Find downloaded column index
+                        int downloadedColIdx = findColumnIndex(uiHeaders, downloadedColName)
+                        
+                        if (downloadedColIdx >= 0 && downloadedColIdx < uiRow.size()) {
+                            String expectedValue = (tsvRow[expectedTsvColIdx] ?: '').trim()
+                            String actualValue = (uiRow[downloadedColIdx] ?: '').trim()
+                            
+                            // Track result (both pass and fail)
+                            boolean isMatch = (expectedValue == actualValue)
+                            Map<String, Object> result = [
+                                row: rowIdx + 1,
+                                column: expectedTsvCol,
+                                expected: expectedValue,
+                                actual: actualValue,
+                                matchType: 'exact',
+                                nodeType: nodeType,
+                                note: "Mapped from downloaded column '${downloadedColName}'",
+                                result: isMatch ? 'PASS' : 'FAIL'
+                            ]
+                            allResults.add(result)
+                            
+                            if (!isMatch) {
+                                println("   🔍 Expected_* Mismatch Row ${rowIdx + 1}:")
+                                println("      TSV '${expectedTsvCol}' (expected): '${expectedValue}'")
+                                println("      Downloaded '${downloadedColName}' (actual): '${actualValue}'")
+                                mismatches.add(result)
+                            } else {
+                                // Log successful match for first few rows
+                                if (rowIdx < 3) {
+                                    println("   ✅ Expected_* Match Row ${rowIdx + 1}: TSV '${expectedTsvCol}'='${expectedValue}' == Downloaded '${downloadedColName}'='${actualValue}'")
+                                }
+                            }
+                        } else {
+                            println("   ⚠️  Expected_* column '${expectedTsvCol}' mapped to '${downloadedColName}' but column not found in downloaded file")
                         }
                     }
                 }
             }
+            
+            // Handle rows that exist in one file but not the other
+            if (tsvRows.size() > uiRows.size()) {
+                println("   ⚠️  TSV has ${tsvRows.size()} rows but downloaded file has only ${uiRows.size()} rows")
+                for (int extraRowIdx = uiRows.size(); extraRowIdx < tsvRows.size(); extraRowIdx++) {
+                    Map<String, Object> result = [
+                        row: extraRowIdx + 1,
+                        column: 'Row Count',
+                        expected: 'Row exists in TSV',
+                        actual: 'Row missing in downloaded file',
+                        matchType: 'exact',
+                        nodeType: nodeType,
+                        result: 'FAIL'
+                    ]
+                    mismatches.add(result)
+                    allResults.add(result)
+                }
+            } else if (uiRows.size() > tsvRows.size()) {
+                println("   ⚠️  Downloaded file has ${uiRows.size()} rows but TSV has only ${tsvRows.size()} rows")
+                for (int extraRowIdx = tsvRows.size(); extraRowIdx < uiRows.size(); extraRowIdx++) {
+                    Map<String, Object> result = [
+                        row: extraRowIdx + 1,
+                        column: 'Row Count',
+                        expected: 'Row exists in TSV',
+                        actual: 'Extra row in downloaded file',
+                        matchType: 'exact',
+                        nodeType: nodeType,
+                        result: 'FAIL'
+                    ]
+                    mismatches.add(result)
+                    allResults.add(result)
+                }
+            }
         }
         
-        return mismatches
+        return [
+            mismatches: mismatches,
+            allResults: allResults
+        ]
     }
 }

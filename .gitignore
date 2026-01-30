@@ -1,0 +1,46 @@
+# Katalon Studio
+.settings/
+bin/
+.classpath
+.project
+*.log
+*.tmp
+
+# Credentials and secrets
+.env
+.env.*
+*.env
+*.pem
+*-key.pem
+credentials
+config
+aws-credentials*
+
+# Test data (if contains sensitive info)
+# TestData/
+
+# Build artifacts
+build/
+target/
+*.class
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
